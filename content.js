@@ -73,7 +73,7 @@ function filterProducts() {
         catalogItems = document.querySelectorAll('[data-testid^="grid-item"]');
       } else if (currentSite === 'tradera') {
         // Target item cards by ID pattern (item-card-*) or class
-        catalogItems = document.querySelectorAll('[id^="item-card-"], .item-card, .item-card-new');
+        catalogItems = document.querySelectorAll('[id^="item-card-"]');
         
         console.log(`Found ${catalogItems.length} Tradera items`);
       }
@@ -145,18 +145,7 @@ function filterProducts() {
       
       // Now process all items to hide at once
       itemsToHide.forEach(item => {
-        if (currentSite === 'tradera') {
-          // Find and remove the parent container for Tradera
-          const parentItemCard = findTraderaItemCard(item);
-          if (parentItemCard) {
-            parentItemCard.style.display = 'none'; // Use style.display none instead of remove
-          } else {
-            item.style.display = 'none';
-          }
-        } else {
-          // For Vinted, just hide the item
-          item.style.display = 'none';
-        }
+        item.style.display = 'none';
       });
       
       // Update the filtered items count
@@ -169,53 +158,6 @@ function filterProducts() {
   });
 }
 
-// Function to find the Tradera item-card and its parent
-function findTraderaItemCard(element) {
-  try {
-    // Start with the provided element
-    let current = element;
-    
-    // If element has an ID starting with item-card-, use it directly
-    if (current.id && current.id.startsWith('item-card-')) {
-      // Look for the parent container - go up to find the grid item container
-      // Look for parent with @container class or go up several levels
-      let parent = current.parentElement;
-      
-      // Go up the DOM tree to find the grid item container
-      // Usually it's 3-4 levels up from the item-card element
-      for (let i = 0; i < 6 && parent; i++) {
-        // Check if this parent contains the @container class or is a grid column
-        if (parent.className && (
-            parent.className.includes('@container') ||
-            parent.className.includes('col-') ||
-            parent.classList.contains('col') ||
-            parent.classList.contains('grid-item')
-        )) {
-          return parent;
-        }
-        parent = parent.parentElement;
-      }
-      
-      // If we couldn't find a specific parent, return the element itself
-      return current;
-    }
-    
-    // Fallback for old structure
-    if (!current.classList.contains('item-card') && !current.classList.contains('item-card-new')) {
-      current = current.closest('.item-card, .item-card-new, [id^="item-card-"]');
-      if (!current) return null;
-    }
-    
-    // Find the parent container
-    const parent = current.closest('.col, .col-md-6, .col-lg-4, .result-item, .item-row, [class*="@container"]');
-    
-    return parent || current;
-  } catch (error) {
-    console.error('Error in findTraderaItemCard:', error);
-    return null;
-  }
-}
-
 // Function to show all previously hidden items
 function showAllItems() {
   try {
@@ -225,17 +167,8 @@ function showAllItems() {
         item.style.display = '';
       });
     } else if (currentSite === 'tradera') {
-      // For Tradera show all hidden items
-      const items = document.querySelectorAll('.item-card[style*="display: none"], .item-card-new[style*="display: none"]');
-      items.forEach(item => {
-        item.style.display = '';
-      });
-      
-      // Also check for parent containers that might be hidden
-      const parentContainers = document.querySelectorAll('.col[style*="display: none"], .col-md-6[style*="display: none"], .col-lg-4[style*="display: none"], .result-item[style*="display: none"], .item-row[style*="display: none"]');
-      parentContainers.forEach(container => {
-        container.style.display = '';
-      });
+      const items = document.querySelectorAll('[id^="item-card-"][style*="display: none"]');
+      items.forEach(item => { item.style.display = ''; });
     }
   } catch (error) {
     console.error('Error in showAllItems:', error);
@@ -319,8 +252,8 @@ function ensurePageLoaded(callback, maxAttempts = 15, interval = 500) {
       let contentLoaded = false;
       
       if (currentSite === 'tradera') {
-        contentLoaded = document.querySelector('.item-card') !== null || 
-                         document.querySelector('.item-card-new') !== null;
+        contentLoaded = document.querySelector('[id^="item-card-"]') !== null ||
+                         document.querySelector('[class*="item-card_itemCard"]') !== null;
       } else if (currentSite === 'vinted') {
         contentLoaded = document.querySelector('[data-testid="item-box-wrapper"]') !== null;
       }
