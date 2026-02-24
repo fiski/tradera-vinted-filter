@@ -10,152 +10,163 @@ let observer;
 // Counter for filtered items
 let filteredItemsCount = 0;
 
+// In-memory brand cache — eliminates storage reads from the hot path
+let cachedActiveBrands = null;    // lowercase, pre-computed; null = not loaded
+let cachedSiteSettings = null;
+
 // Determine which site we're on
-const currentSite = window.location.hostname.includes('vinted.se') ? 'vinted' : 
+const currentSite = window.location.hostname.includes('vinted.se') ? 'vinted' :
                    window.location.hostname.includes('tradera.com') ? 'tradera' : null;
 
 console.log('Brand Filter running on:', currentSite);
 
-// Function to start observing DOM changes
-function startObserving() {
-  // Select the node that will be observed for mutations
-  const targetNode = document.body;
-
-  // Create an observer instance linked to the callback function
-  observer = new MutationObserver(filterProducts);
-
-  // Start observing the target node for configured mutations
-  observer.observe(targetNode, observerConfig);
-  
-  // Initial filtering
-  filterProducts();
+// Populate the brand cache from storage and call an optional callback
+function loadBrandsCache(callback) {
+  chrome.storage.sync.get({
+    excludedBrands: [],
+    disabledBrands: [],
+    siteSettings: { vinted: true, tradera: true }
+  }, function(data) {
+    const active = data.excludedBrands.filter(b => !data.disabledBrands.includes(b));
+    cachedActiveBrands = active.map(b => b.toLowerCase());
+    cachedSiteSettings = data.siteSettings;
+    if (callback) callback();
+  });
 }
 
-// Main function to filter out products
-function filterProducts() {
-  chrome.storage.sync.get({ 
-    excludedBrands: [], 
-    disabledBrands: [],
-    siteSettings: { vinted: true, tradera: true } // Default both sites to enabled
-  }, function(data) {
-    try {
-      const excludedBrands = data.excludedBrands;
-      const disabledBrands = data.disabledBrands;
-      const siteSettings = data.siteSettings;
-      
-      // Check if filtering is enabled for the current site
-      if (!currentSite || !siteSettings[currentSite]) {
-        // Filtering is disabled for this site or we're on an unsupported site
-        // Show all items in case they were previously hidden
-        showAllItems();
-        // Reset counter since we're not filtering
-        filteredItemsCount = 0;
-        updateFilterStats();
-        return;
-      }
-      
-      // Create a set of active excluded brands (those not in disabledBrands)
-      const activeExcludedBrands = excludedBrands.filter(brand => !disabledBrands.includes(brand));
-      
-      // If no brands to exclude, no need to filter
-      if (activeExcludedBrands.length === 0) {
-        // Reset counter when no active brands
-        filteredItemsCount = 0;
-        updateFilterStats();
-        return;
-      }
-      
-      console.log('Filtering brands:', activeExcludedBrands);
-      
-      // Get all catalog items based on the current site
-      let catalogItems = [];
-      if (currentSite === 'vinted') {
-        catalogItems = document.querySelectorAll('[data-testid^="grid-item"]');
-      } else if (currentSite === 'tradera') {
-        // Target item cards by ID pattern (item-card-*) or class
-        catalogItems = document.querySelectorAll('[id^="item-card-"]');
-        
-        console.log(`Found ${catalogItems.length} Tradera items`);
-      }
-      
-      console.log(`Found ${catalogItems.length} items to check on ${currentSite}`);
-      
-      // Reset the counter before counting again
-      let currentFilteredCount = 0;
-      
-      // Create an array of items to hide rather than hiding immediately
-      const itemsToHide = [];
-      
-      catalogItems.forEach(item => {
-        // Find the brand element within the item based on the site
-        let brandElements = [];
-        
+// Debounce state for the observer
+let filterTimer = null;
+let pendingNewItems = [];
+
+// MutationObserver callback — collects new item nodes and debounces filtering
+function handleMutations(mutationsList) {
+  for (const mutation of mutationsList) {
+    for (const node of mutation.addedNodes) {
+      if (node.nodeType !== 1) continue;
+      if (currentSite === 'vinted' && node.matches?.('[data-testid^="grid-item"]')) {
+        pendingNewItems.push(node);
+      } else if (currentSite === 'tradera' && node.id?.startsWith('item-card-')) {
+        pendingNewItems.push(node);
+      } else {
         if (currentSite === 'vinted') {
-          const brandElement = item.querySelector('.new-item-box__description p[data-testid$="--description-title"]');
-          if (brandElement) {
-            brandElements.push(brandElement);
-          }
+          node.querySelectorAll?.('[data-testid^="grid-item"]').forEach(n => pendingNewItems.push(n));
         } else if (currentSite === 'tradera') {
-          // For tradera, check the title element with the new class structure
-          const titleElement = item.querySelector('[class*="item-card_title"]');
-          if (titleElement) {
-            brandElements.push(titleElement);
-          }
-          
-          // Also check brand buttons if they exist
-          const brandButtons = item.querySelectorAll('.attribute-buttons-list_attribute__ssoUD');
-          brandButtons.forEach(btn => brandElements.push(btn));
-          
-          // And check title links as fallback
-          const titleLink = item.querySelector('a.text-truncate-one-line, a.item-card-title');
-          if (titleLink) {
-            brandElements.push(titleLink);
-          }
+          node.querySelectorAll?.('[id^="item-card-"]').forEach(n => pendingNewItems.push(n));
         }
-        
-        // If we found brand elements, check against our list
-        if (brandElements.length > 0) {
-          let shouldHide = false;
-          
-          // Check each brand element against our excluded brands
-          for (const element of brandElements) {
-            if (!element || !element.textContent) continue;
-            
-            const brandText = element.textContent.trim();
-            
-            for (const brand of activeExcludedBrands) {
-              if (brandText.toLowerCase().includes(brand.toLowerCase())) {
-                shouldHide = true;
-                break;
-              }
-            }
-            
-            if (shouldHide) break;
-          }
-          
-          if (shouldHide) {
-            itemsToHide.push(item);
-            currentFilteredCount++;
-          } else {
-            // Show the item (in case it was hidden before)
-            item.style.display = '';
-          }
-        }
-      });
-      
-      // Now process all items to hide at once
-      itemsToHide.forEach(item => {
-        item.style.display = 'none';
-      });
-      
-      // Update the filtered items count
-      filteredItemsCount = currentFilteredCount;
-      console.log(`Setting filtered count to ${filteredItemsCount} for ${currentSite}`);
-      updateFilterStats();
-    } catch (error) {
-      console.error('Error in filterProducts:', error);
+      }
     }
-  });
+  }
+
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => {
+    const newItems = pendingNewItems.splice(0); // drain and reset
+    if (newItems.length > 0) {
+      filterItems(newItems);
+    }
+  }, 50);
+}
+
+// Function to start observing DOM changes
+function startObserving() {
+  const targetNode = document.body;
+  observer = new MutationObserver(handleMutations);
+  observer.observe(targetNode, observerConfig);
+  loadBrandsCache(() => filterProducts());
+}
+
+// Full rescan — called on init, URL change, and brand/setting updates
+function filterProducts() {
+  if (cachedActiveBrands === null) {
+    loadBrandsCache(() => filterProducts());
+    return;
+  }
+  runFilter(null); // null = scan all items
+}
+
+// Incremental filter for newly added nodes only — called from observer
+function filterItems(nodes) {
+  if (cachedActiveBrands === null) return; // cache not ready; init full scan will catch it
+  runFilter(nodes);
+}
+
+// Shared filter implementation
+function runFilter(nodes) {
+  try {
+    if (!currentSite || !cachedSiteSettings[currentSite]) {
+      showAllItems();
+      filteredItemsCount = 0;
+      updateFilterStats();
+      return;
+    }
+
+    if (cachedActiveBrands.length === 0) {
+      filteredItemsCount = 0;
+      updateFilterStats();
+      return;
+    }
+
+    // If nodes is null, scan the full page; otherwise scan only the provided nodes
+    let catalogItems;
+    if (nodes !== null) {
+      catalogItems = nodes;
+    } else if (currentSite === 'vinted') {
+      catalogItems = Array.from(document.querySelectorAll('[data-testid^="grid-item"]'));
+    } else if (currentSite === 'tradera') {
+      catalogItems = Array.from(document.querySelectorAll('[id^="item-card-"]'));
+    } else {
+      return;
+    }
+
+    console.log(`[${currentSite}] Checking ${catalogItems.length} items (${nodes === null ? 'full scan' : 'incremental'})`);
+
+    let addedToHidden = 0;
+
+    catalogItems.forEach(item => {
+      // Skip items already hidden by this extension
+      if (item.style.display === 'none') return;
+
+      let brandElements = [];
+
+      if (currentSite === 'vinted') {
+        const el = item.querySelector('.new-item-box__description p[data-testid$="--description-title"]');
+        if (el) brandElements.push(el);
+      } else if (currentSite === 'tradera') {
+        const titleEl = item.querySelector('[class*="item-card_title"]');
+        if (titleEl) brandElements.push(titleEl);
+        item.querySelectorAll('.attribute-buttons-list_attribute__ssoUD').forEach(btn => brandElements.push(btn));
+        const link = item.querySelector('a.text-truncate-one-line, a.item-card-title');
+        if (link) brandElements.push(link);
+      }
+
+      if (brandElements.length === 0) return;
+
+      for (const el of brandElements) {
+        if (!el?.textContent) continue;
+        const text = el.textContent.trim().toLowerCase();
+        if (cachedActiveBrands.some(brand => text.includes(brand))) {
+          item.style.display = 'none';
+          addedToHidden++;
+          return;
+        }
+      }
+    });
+
+    // On full scan, recount all hidden items; on incremental, add to existing count
+    if (nodes === null) {
+      filteredItemsCount = document.querySelectorAll(
+        currentSite === 'vinted'
+          ? '[data-testid^="grid-item"][style*="display: none"]'
+          : '[id^="item-card-"][style*="display: none"]'
+      ).length;
+    } else {
+      filteredItemsCount += addedToHidden;
+    }
+
+    console.log(`[${currentSite}] Filtered items count:`, filteredItemsCount);
+    updateFilterStats();
+  } catch (error) {
+    console.error('Error in runFilter:', error);
+  }
 }
 
 // Function to show all previously hidden items
@@ -178,22 +189,18 @@ function showAllItems() {
 // Function to update filter statistics
 function updateFilterStats() {
   try {
-    // Send the stats to the popup if it's open
-    sendMessageWithRetry({ 
-      action: 'updateFilterStats', 
-      stats: { 
+    sendMessageWithRetry({
+      action: 'updateFilterStats',
+      stats: {
         filteredCount: filteredItemsCount,
         site: currentSite
-      } 
+      }
     });
-    
-    // Send the count to the background script for the badge
+
     sendMessageWithRetry({
       action: 'updateBadgeCount',
       count: filteredItemsCount
     });
-    
-    console.log(`[${currentSite}] Filtered items count:`, filteredItemsCount);
   } catch (error) {
     console.error('Error in updateFilterStats:', error);
   }
@@ -202,63 +209,58 @@ function updateFilterStats() {
 // Improved function to send chrome runtime messages with retry logic
 function sendMessageWithRetry(message, maxRetries = 2) {
   let attempts = 0;
-  
+
   function trySendMessage() {
     attempts++;
-    
-    // Check if runtime is available
+
     if (!chrome.runtime) {
       console.warn('Chrome runtime not available');
       return;
     }
-    
+
     try {
       chrome.runtime.sendMessage(message, function(response) {
         if (chrome.runtime.lastError) {
           const errorMsg = chrome.runtime.lastError.message;
           console.warn('Message send error:', errorMsg);
-          
-          // Only retry if the error is about connection and we have retries left
-          if (attempts <= maxRetries && 
-              (errorMsg.includes('Receiving end does not exist') || 
-               errorMsg.includes('connection') || 
+
+          if (attempts <= maxRetries &&
+              (errorMsg.includes('Receiving end does not exist') ||
+               errorMsg.includes('connection') ||
                errorMsg.includes('disconnected'))) {
             console.log(`Retrying message send (attempt ${attempts}/${maxRetries})`);
-            setTimeout(trySendMessage, 500 * attempts); // Increasing delay
+            setTimeout(trySendMessage, 500 * attempts);
           }
         }
       });
     } catch (err) {
       console.error('Error in sendMessage:', err);
-      // If it's an unexpected error, still try to retry
       if (attempts <= maxRetries) {
         setTimeout(trySendMessage, 500 * attempts);
       }
     }
   }
-  
+
   trySendMessage();
 }
 
 // Function to delay execution to ensure page is loaded
 function ensurePageLoaded(callback, maxAttempts = 15, interval = 500) {
   let attempts = 0;
-  
+
   function checkAndExecute() {
     attempts++;
-    
+
     if (document.body) {
-      // Check if main content is loaded
       let contentLoaded = false;
-      
+
       if (currentSite === 'tradera') {
         contentLoaded = document.querySelector('[id^="item-card-"]') !== null ||
                          document.querySelector('[class*="item-card_itemCard"]') !== null;
       } else if (currentSite === 'vinted') {
         contentLoaded = document.querySelector('[data-testid="item-box-wrapper"]') !== null;
       }
-      
-      // If content is loaded or we've reached max attempts
+
       if (contentLoaded || attempts >= maxAttempts) {
         console.log(`Content loaded after ${attempts} attempts`);
         callback();
@@ -269,7 +271,6 @@ function ensurePageLoaded(callback, maxAttempts = 15, interval = 500) {
         setTimeout(checkAndExecute, interval);
       }
     } else {
-      // Body not available yet, keep waiting
       if (attempts < maxAttempts) {
         setTimeout(checkAndExecute, interval);
       } else {
@@ -278,7 +279,7 @@ function ensurePageLoaded(callback, maxAttempts = 15, interval = 500) {
       }
     }
   }
-  
+
   checkAndExecute();
 }
 
@@ -298,11 +299,9 @@ new MutationObserver(() => {
   if (url !== lastUrl) {
     lastUrl = url;
     console.log('URL changed, filtering products...');
-    
-    // Reset counter when URL changes
+
     filteredItemsCount = 0;
-    
-    // Wait a bit for the page to load content
+
     setTimeout(() => {
       ensurePageLoaded(filterProducts);
     }, 1000);
@@ -312,49 +311,39 @@ new MutationObserver(() => {
 // Add a message listener to handle immediate filtering when brands are updated
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    if (message.action === 'brandsUpdated') {
-      console.log('Brands updated, re-filtering products...');
-      filterProducts();
-      // Send success response
-      sendResponse({ success: true });
-    }
-    else if (message.action === 'siteSettingsUpdated') {
-      console.log('Site settings updated, re-filtering products...');
-      filterProducts();
-      // Send success response
+    if (message.action === 'brandsUpdated' || message.action === 'siteSettingsUpdated') {
+      console.log(`${message.action}, refreshing cache and re-filtering...`);
+      loadBrandsCache(() => {
+        showAllItems();
+        filteredItemsCount = 0;
+        filterProducts();
+      });
       sendResponse({ success: true });
     }
     else if (message.action === 'requestStats') {
-      // Log current statistics for debugging
       console.log(`Sending stats: ${filteredItemsCount} items filtered on ${currentSite}`);
-      
-      // Respond with current statistics
-      sendResponse({ 
-        stats: { 
+      sendResponse({
+        stats: {
           filteredCount: filteredItemsCount,
           site: currentSite
-        } 
+        }
       });
     }
-    
-    // Return true to indicate we want to respond asynchronously
+
     return true;
   } catch (error) {
     console.error('Error in message listener:', error);
-    // Send error response
     sendResponse({ error: error.message });
     return true;
   }
 });
 
-// Add event listener for when the extension is unloaded or reloaded
+// Clean up on unload
 window.addEventListener('beforeunload', function() {
-  // Clean up the observer to prevent memory leaks
   if (observer) {
     observer.disconnect();
   }
-  
-  // Notify background script that we're leaving the filtered site
+
   chrome.runtime.sendMessage({ action: 'leavingSite' }, function(response) {
     // No need to handle response as page is unloading
   });
